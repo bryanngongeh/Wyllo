@@ -1,0 +1,106 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-wyllo}
+      POSTGRES_USER: ${POSTGRES_USER:-wyllo}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local_unsafe_dev_only}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["sh", "-c", "redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-local_unsafe_dev_only}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    command: ["node", "dist/migrate.js"]
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgres://${POSTGRES_USER:-wyllo}:${POSTGRES_PASSWORD:-local_unsafe_dev_only}@postgres:5432/${POSTGRES_DB:-wyllo}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      API_PORT: 4174
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173,http://127.0.0.1:5173}
+      AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+      AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+      MAL_CLIENT_ID: ${MAL_CLIENT_ID:-}
+      ENABLE_JIKAN_METADATA: ${ENABLE_JIKAN_METADATA:-false}
+      JIKAN_RIGHTS_REVIEW_JSON: ${JIKAN_RIGHTS_REVIEW_JSON:-}
+      METADATA_PROVIDERS_JSON: ${METADATA_PROVIDERS_JSON:-}
+      METADATA_API_KEYS_JSON: ${METADATA_API_KEYS_JSON:-}
+      DATABASE_URL: postgres://${POSTGRES_USER:-wyllo}:${POSTGRES_PASSWORD:-local_unsafe_dev_only}@postgres:5432/${POSTGRES_DB:-wyllo}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-local_unsafe_dev_only}@redis:6379/0
+      MODULE_CATALOG_PUBLIC_KEY: ${MODULE_CATALOG_PUBLIC_KEY:-}
+      MODULE_CATALOG_SIGNATURE: ${MODULE_CATALOG_SIGNATURE:-}
+      ALLOW_DEMO_MODULES: ${ALLOW_DEMO_MODULES:-false}
+    ports:
+      - "127.0.0.1:${API_HOST_PORT:-4174}:4174"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4174/api/v1/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        VITE_AUTH0_DOMAIN: ${AUTH0_DOMAIN:-}
+        VITE_AUTH0_CLIENT_ID: ${AUTH0_CLIENT_ID:-}
+        VITE_AUTH0_AUDIENCE: ${AUTH0_AUDIENCE:-}
+    environment:
+      API_INTERNAL_URL: http://api:4174
+    ports:
+      - "127.0.0.1:${WEB_HOST_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
